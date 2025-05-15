@@ -673,7 +673,9 @@ class LiteLlm(BaseLlm):
               function_calls[index]["name"] += chunk.name
             if chunk.args:
               function_calls[index]["args"] += chunk.args
-            function_calls[index]["id"] = chunk.id or function_calls[index]["id"]
+            function_calls[index]["id"] = (
+                chunk.id or function_calls[index]["id"]
+            )
           elif isinstance(chunk, TextChunk):
             text += chunk.text
             yield _message_to_generate_content_response(
