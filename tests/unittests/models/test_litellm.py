@@ -13,8 +13,10 @@
 # limitations under the License.
 
 
+import json
 from unittest.mock import AsyncMock
 from unittest.mock import Mock
+
 from google.adk.models.lite_llm import _content_to_message_param
 from google.adk.models.lite_llm import _function_declaration_to_tool_param
 from google.adk.models.lite_llm import _get_content
@@ -37,7 +39,6 @@ from litellm.types.utils import Delta
 from litellm.types.utils import ModelResponse
 from litellm.types.utils import StreamingChoices
 import pytest
-import json
 
 LLM_REQUEST_WITH_FUNCTION_DECLARATION = LlmRequest(
     contents=[
@@ -289,6 +290,105 @@ def mock_response():
   )
 
 
+# Test case reflecting litellm v1.71.2, ollama v0.9.0 streaming response
+# no tool call ids
+# indices all 0
+# finish_reason stop instead of tool_calls
+NON_COMPLIANT_MULTIPLE_FUNCTION_CALLS_STREAM = [
+    ModelResponse(
+        choices=[
+            StreamingChoices(
+                finish_reason=None,
+                delta=Delta(
+                    role="assistant",
+                    tool_calls=[
+                        ChatCompletionDeltaToolCall(
+                            type="function",
+                            id=None,
+                            function=Function(
+                                name="function_1",
+                                arguments='{"arg": "val',
+                            ),
+                            index=0,
+                        )
+                    ],
+                ),
+            )
+        ]
+    ),
+    ModelResponse(
+        choices=[
+            StreamingChoices(
+                finish_reason=None,
+                delta=Delta(
+                    role="assistant",
+                    tool_calls=[
+                        ChatCompletionDeltaToolCall(
+                            type="function",
+                            id=None,
+                            function=Function(
+                                name=None,
+                                arguments='ue1"}',
+                            ),
+                            index=0,
+                        )
+                    ],
+                ),
+            )
+        ]
+    ),
+    ModelResponse(
+        choices=[
+            StreamingChoices(
+                finish_reason=None,
+                delta=Delta(
+                    role="assistant",
+                    tool_calls=[
+                        ChatCompletionDeltaToolCall(
+                            type="function",
+                            id=None,
+                            function=Function(
+                                name="function_2",
+                                arguments='{"arg": "val',
+                            ),
+                            index=0,
+                        )
+                    ],
+                ),
+            )
+        ]
+    ),
+    ModelResponse(
+        choices=[
+            StreamingChoices(
+                finish_reason=None,
+                delta=Delta(
+                    role="assistant",
+                    tool_calls=[
+                        ChatCompletionDeltaToolCall(
+                            type="function",
+                            id=None,
+                            function=Function(
+                                name=None,
+                                arguments='ue2"}',
+                            ),
+                            index=0,
+                        )
+                    ],
+                ),
+            )
+        ]
+    ),
+    ModelResponse(
+        choices=[
+            StreamingChoices(
+                finish_reason="stop",
+            )
+        ]
+    ),
+]
+
+
 @pytest.fixture
 def mock_acompletion(mock_response):
   return AsyncMock(return_value=mock_response)
@@ -316,9 +416,26 @@ class MockLLMClient(LiteLLMClient):
     self.completion_mock = completion_mock
 
   async def acompletion(self, model, messages, tools, **kwargs):
-    return await self.acompletion_mock(
-        model=model, messages=messages, tools=tools, **kwargs
-    )
+    if kwargs.get("stream", False):
+      kwargs_copy = dict(kwargs)
+      kwargs_copy.pop("stream", None)
+
+      async def stream_generator():
+        stream_data = self.completion_mock(
+            model=model,
+            messages=messages,
+            tools=tools,
+            stream=True,
+            **kwargs_copy,
+        )
+        for item in stream_data:
+          yield item
+
+      return stream_generator()
+    else:
+      return await self.acompletion_mock(
+          model=model, messages=messages, tools=tools, **kwargs
+      )
 
   def completion(self, model, messages, tools, stream, **kwargs):
     return self.completion_mock(
@@ -360,57 +477,59 @@ async def test_generate_content_async(mock_acompletion, lite_llm_instance):
 
 
 litellm_append_user_content_test_cases = [
-  pytest.param(
-    LlmRequest(
-      contents=[
-        types.Content(
-          role="developer",
-          parts=[types.Part.from_text(text="Test prompt")]
-        )
-      ]
-    ),
-    2,
-    id="litellm request without user content"
-  ),
-  pytest.param(
-    LlmRequest(
-      contents=[
-        types.Content(
-          role="user",
-          parts=[types.Part.from_text(text="user prompt")]
-        )
-      ]
-    ),
-    1,
-    id="litellm request with user content"
-  ),
-  pytest.param(
-    LlmRequest(
-      contents=[
-        types.Content(
-          role="model",
-          parts=[types.Part.from_text(text="model prompt")]
+    pytest.param(
+        LlmRequest(
+            contents=[
+                types.Content(
+                    role="developer",
+                    parts=[types.Part.from_text(text="Test prompt")],
+                )
+            ]
         ),
-        types.Content(
-          role="user",
-          parts=[types.Part.from_text(text="user prompt")]
-        ),
-        types.Content(
-          role="model",
-          parts=[types.Part.from_text(text="model prompt")]
-        )
-      ]
+        2,
+        id="litellm request without user content",
     ),
-    4,
-    id="user content is not the last message scenario"
-  )
+    pytest.param(
+        LlmRequest(
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text="user prompt")],
+                )
+            ]
+        ),
+        1,
+        id="litellm request with user content",
+    ),
+    pytest.param(
+        LlmRequest(
+            contents=[
+                types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text="model prompt")],
+                ),
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text="user prompt")],
+                ),
+                types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text="model prompt")],
+                ),
+            ]
+        ),
+        4,
+        id="user content is not the last message scenario",
+    ),
 ]
 
 
 @pytest.mark.parametrize(
     "llm_request, expected_output", litellm_append_user_content_test_cases
 )
-def test_maybe_append_user_content(lite_llm_instance, llm_request, expected_output):
+def test_maybe_append_user_content(
+    lite_llm_instance, llm_request, expected_output
+):
 
   lite_llm_instance._maybe_append_user_content(llm_request)
 
@@ -787,22 +906,22 @@ def test_content_to_message_param_function_call():
   content = types.Content(
       role="assistant",
       parts=[
+          types.Part.from_text(text="test response"),
           types.Part.from_function_call(
               name="test_function", args={"test_arg": "test_value"}
-          )
+          ),
       ],
   )
-  content.parts[0].function_call.id = "test_tool_call_id"
+  content.parts[1].function_call.id = "test_tool_call_id"
   message = _content_to_message_param(content)
   assert message["role"] == "assistant"
-  assert message["content"] == None
-  assert message["tool_calls"][0].type == "function"
-  assert message["tool_calls"][0].id == "test_tool_call_id"
-  assert message["tool_calls"][0].function.name == "test_function"
-  assert (
-      message["tool_calls"][0].function.arguments
-      == '{"test_arg": "test_value"}'
-  )
+  assert message["content"] == "test response"
+
+  tool_call = message["tool_calls"][0]
+  assert tool_call["type"] == "function"
+  assert tool_call["id"] == "test_tool_call_id"
+  assert tool_call["function"]["name"] == "test_function"
+  assert tool_call["function"]["arguments"] == '{"test_arg": "test_value"}'
 
 
 def test_message_to_generate_content_response_text():
@@ -1092,11 +1211,11 @@ async def test_generate_content_async_stream(
   assert responses[2].content.role == "model"
   assert responses[2].content.parts[0].text == "two:"
   assert responses[3].content.role == "model"
-  assert responses[3].content.parts[0].function_call.name == "test_function"
-  assert responses[3].content.parts[0].function_call.args == {
+  assert responses[3].content.parts[-1].function_call.name == "test_function"
+  assert responses[3].content.parts[-1].function_call.args == {
       "test_arg": "test_value"
   }
-  assert responses[3].content.parts[0].function_call.id == "test_tool_call_id"
+  assert responses[3].content.parts[-1].function_call.id == "test_tool_call_id"
   mock_completion.assert_called_once()
 
   _, kwargs = mock_completion.call_args
@@ -1155,11 +1274,11 @@ async def test_generate_content_async_stream_with_usage_metadata(
   assert responses[2].content.role == "model"
   assert responses[2].content.parts[0].text == "two:"
   assert responses[3].content.role == "model"
-  assert responses[3].content.parts[0].function_call.name == "test_function"
-  assert responses[3].content.parts[0].function_call.args == {
+  assert responses[3].content.parts[-1].function_call.name == "test_function"
+  assert responses[3].content.parts[-1].function_call.args == {
       "test_arg": "test_value"
   }
-  assert responses[3].content.parts[0].function_call.id == "test_tool_call_id"
+  assert responses[3].content.parts[-1].function_call.id == "test_tool_call_id"
 
   assert responses[3].usage_metadata.prompt_token_count == 10
   assert responses[3].usage_metadata.candidates_token_count == 5
@@ -1188,74 +1307,175 @@ async def test_generate_content_async_stream_with_usage_metadata(
 async def test_generate_content_async_multiple_function_calls(
     mock_completion, lite_llm_instance
 ):
-    """Test handling of multiple function calls with different indices in streaming mode.
+  """Test handling of multiple function calls with different indices in streaming mode.
 
-    This test verifies that:
-    1. Multiple function calls with different indices are handled correctly
-    2. Arguments and names are properly accumulated for each function call
-    3. The final response contains all function calls with correct indices
-    """
-    mock_completion.return_value = MULTIPLE_FUNCTION_CALLS_STREAM
+  This test verifies that:
+  1. Multiple function calls with different indices are handled correctly
+  2. Arguments and names are properly accumulated for each function call
+  3. The final response contains all function calls with correct indices
+  """
+  mock_completion.return_value = MULTIPLE_FUNCTION_CALLS_STREAM
 
-    llm_request = LlmRequest(
-        contents=[
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text="Test multiple function calls")],
-            )
-        ],
-        config=types.GenerateContentConfig(
-            tools=[
-                types.Tool(
-                    function_declarations=[
-                        types.FunctionDeclaration(
-                            name="function_1",
-                            description="First test function",
-                            parameters=types.Schema(
-                                type=types.Type.OBJECT,
-                                properties={
-                                    "arg": types.Schema(type=types.Type.STRING),
-                                },
-                            ),
-                        ),
-                        types.FunctionDeclaration(
-                            name="function_2",
-                            description="Second test function",
-                            parameters=types.Schema(
-                                type=types.Type.OBJECT,
-                                properties={
-                                    "arg": types.Schema(type=types.Type.STRING),
-                                },
-                            ),
-                        ),
-                    ]
-                )
-            ],
-        ),
-    )
+  llm_request = LlmRequest(
+      contents=[
+          types.Content(
+              role="user",
+              parts=[types.Part.from_text(text="Test multiple function calls")],
+          )
+      ],
+      config=types.GenerateContentConfig(
+          tools=[
+              types.Tool(
+                  function_declarations=[
+                      types.FunctionDeclaration(
+                          name="function_1",
+                          description="First test function",
+                          parameters=types.Schema(
+                              type=types.Type.OBJECT,
+                              properties={
+                                  "arg": types.Schema(type=types.Type.STRING),
+                              },
+                          ),
+                      ),
+                      types.FunctionDeclaration(
+                          name="function_2",
+                          description="Second test function",
+                          parameters=types.Schema(
+                              type=types.Type.OBJECT,
+                              properties={
+                                  "arg": types.Schema(type=types.Type.STRING),
+                              },
+                          ),
+                      ),
+                  ]
+              )
+          ],
+      ),
+  )
 
-    responses = []
-    async for response in lite_llm_instance.generate_content_async(
-        llm_request, stream=True
-    ):
-        responses.append(response)
+  responses = []
+  async for response in lite_llm_instance.generate_content_async(
+      llm_request, stream=True
+  ):
+    responses.append(response)
 
-    # Verify we got the final response with both function calls
-    assert len(responses) > 0
-    final_response = responses[-1]
-    assert final_response.content.role == "model"
-    assert len(final_response.content.parts) == 2
+  # Verify we got the final response with both function calls
+  assert len(responses) > 0
+  final_response = responses[-1]
+  assert final_response.content.role == "model"
+  assert len(final_response.content.parts) == 2
 
-    # Verify first function call
-    assert final_response.content.parts[0].function_call.name == "function_1"
-    assert final_response.content.parts[0].function_call.id == "call_1"
-    assert final_response.content.parts[0].function_call.args == {
-        "arg": "value1"
-    }
+  # Verify first function call
+  assert final_response.content.parts[0].function_call.name == "function_1"
+  assert final_response.content.parts[0].function_call.id == "call_1"
+  assert final_response.content.parts[0].function_call.args == {"arg": "value1"}
 
-    # Verify second function call
-    assert final_response.content.parts[1].function_call.name == "function_2"
-    assert final_response.content.parts[1].function_call.id == "call_2"
-    assert final_response.content.parts[1].function_call.args == {
-        "arg": "value2"
-    }
+  # Verify second function call
+  assert final_response.content.parts[1].function_call.name == "function_2"
+  assert final_response.content.parts[1].function_call.id == "call_2"
+  assert final_response.content.parts[1].function_call.args == {"arg": "value2"}
+
+
+@pytest.mark.asyncio
+async def test_generate_content_async_non_compliant_multiple_function_calls(
+    mock_completion, lite_llm_instance
+):
+  """Test handling of multiple function calls with same 0 indices in streaming mode.
+
+  This test verifies that:
+  1. Multiple function calls with same indices (0) are handled correctly
+  2. Arguments and names are properly accumulated for each function call
+  3. The final response contains all function calls with correct incremented indices
+  """
+  mock_completion.return_value = NON_COMPLIANT_MULTIPLE_FUNCTION_CALLS_STREAM
+
+  llm_request = LlmRequest(
+      contents=[
+          types.Content(
+              role="user",
+              parts=[types.Part.from_text(text="Test multiple function calls")],
+          )
+      ],
+      config=types.GenerateContentConfig(
+          tools=[
+              types.Tool(
+                  function_declarations=[
+                      types.FunctionDeclaration(
+                          name="function_1",
+                          description="First test function",
+                          parameters=types.Schema(
+                              type=types.Type.OBJECT,
+                              properties={
+                                  "arg": types.Schema(type=types.Type.STRING),
+                              },
+                          ),
+                      ),
+                      types.FunctionDeclaration(
+                          name="function_2",
+                          description="Second test function",
+                          parameters=types.Schema(
+                              type=types.Type.OBJECT,
+                              properties={
+                                  "arg": types.Schema(type=types.Type.STRING),
+                              },
+                          ),
+                      ),
+                  ]
+              )
+          ],
+      ),
+  )
+
+  responses = []
+  async for response in lite_llm_instance.generate_content_async(
+      llm_request, stream=True
+  ):
+    responses.append(response)
+
+  # Verify we got the final response with both function calls
+  assert len(responses) > 0
+  final_response = responses[-1]
+  assert final_response.content.role == "model"
+  assert len(final_response.content.parts) == 2
+
+  # Verify first function call
+  assert final_response.content.parts[0].function_call.name == "function_1"
+  assert final_response.content.parts[0].function_call.id == "0"
+  assert final_response.content.parts[0].function_call.args == {"arg": "value1"}
+
+  # Verify second function call
+  assert final_response.content.parts[1].function_call.name == "function_2"
+  assert final_response.content.parts[1].function_call.id == "1"
+  assert final_response.content.parts[1].function_call.args == {"arg": "value2"}
+
+
+@pytest.mark.asyncio
+def test_get_completion_inputs_generation_params():
+  # Test that generation_params are extracted and mapped correctly
+  req = LlmRequest(
+      contents=[
+          types.Content(role="user", parts=[types.Part.from_text(text="hi")]),
+      ],
+      config=types.GenerateContentConfig(
+          temperature=0.33,
+          max_output_tokens=123,
+          top_p=0.88,
+          top_k=7,
+          stop_sequences=["foo", "bar"],
+          presence_penalty=0.1,
+          frequency_penalty=0.2,
+      ),
+  )
+  from google.adk.models.lite_llm import _get_completion_inputs
+
+  _, _, _, generation_params = _get_completion_inputs(req)
+  assert generation_params["temperature"] == 0.33
+  assert generation_params["max_completion_tokens"] == 123
+  assert generation_params["top_p"] == 0.88
+  assert generation_params["top_k"] == 7
+  assert generation_params["stop"] == ["foo", "bar"]
+  assert generation_params["presence_penalty"] == 0.1
+  assert generation_params["frequency_penalty"] == 0.2
+  # Should not include max_output_tokens
+  assert "max_output_tokens" not in generation_params
+  assert "stop_sequences" not in generation_params

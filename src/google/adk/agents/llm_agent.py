@@ -20,8 +20,10 @@ from typing import Any
 from typing import AsyncGenerator
 from typing import Awaitable
 from typing import Callable
+from typing import Dict
 from typing import Literal
 from typing import Optional
+from typing import Type
 from typing import Union
 
 from google.genai import types
@@ -48,12 +50,14 @@ from ..tools.base_tool import BaseTool
 from ..tools.base_toolset import BaseToolset
 from ..tools.function_tool import FunctionTool
 from ..tools.tool_context import ToolContext
+from ..utils.feature_decorator import working_in_progress
 from .base_agent import BaseAgent
+from .base_agent import BaseAgentConfig
 from .callback_context import CallbackContext
 from .invocation_context import InvocationContext
 from .readonly_context import ReadonlyContext
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('google_adk.' + __name__)
 
 _SingleBeforeModelCallback: TypeAlias = Callable[
     [CallbackContext, LlmRequest],
@@ -129,7 +133,7 @@ class LlmAgent(BaseAgent):
   global_instruction: Union[str, InstructionProvider] = ''
   """Instructions for all the agents in the entire agent tree.
 
-  global_instruction ONLY takes effect in root agent.
+  ONLY the global_instruction in root agent will take effect.
 
   For example: use global_instruction to make all agents have a stable identity
   or personality.
@@ -161,10 +165,12 @@ class LlmAgent(BaseAgent):
   # LLM-based agent transfer configs - End
 
   include_contents: Literal['default', 'none'] = 'default'
-  """Whether to include contents in the model request.
+  """Controls content inclusion in model requests.
 
-  When set to 'none', the model request will not include any contents, such as
-  user messages, tool results, etc.
+  Options:
+      default: Model receives relevant conversation history
+      none: Model receives no prior history, operates solely on current
+            instruction and input
   """
 
   # Controlled input/output configurations - Start
@@ -203,11 +209,6 @@ class LlmAgent(BaseAgent):
   NOTE: to use model's built-in code executor, use the `BuiltInCodeExecutor`.
   """
   # Advance features - End
-
-  # TODO: remove below fields after migration. - Start
-  # These fields are added back for easier migration.
-  examples: Optional[ExamplesUnion] = None
-  # TODO: remove above fields after migration. - End
 
   # Callbacks - Start
   before_model_callback: Optional[BeforeModelCallback] = None
@@ -307,31 +308,53 @@ class LlmAgent(BaseAgent):
         ancestor_agent = ancestor_agent.parent_agent
       raise ValueError(f'No model found for {self.name}.')
 
-  async def canonical_instruction(self, ctx: ReadonlyContext) -> str:
+  async def canonical_instruction(
+      self, ctx: ReadonlyContext
+  ) -> tuple[str, bool]:
     """The resolved self.instruction field to construct instruction for this agent.
 
     This method is only for use by Agent Development Kit.
+
+    Args:
+      ctx: The context to retrieve the session state.
+
+    Returns:
+      A tuple of (instruction, bypass_state_injection).
+      instruction: The resolved self.instruction field.
+      bypass_state_injection: Whether the instruction is based on
+      InstructionProvider.
     """
     if isinstance(self.instruction, str):
-      return self.instruction
+      return self.instruction, False
     else:
       instruction = self.instruction(ctx)
       if inspect.isawaitable(instruction):
         instruction = await instruction
-      return instruction
+      return instruction, True
 
-  async def canonical_global_instruction(self, ctx: ReadonlyContext) -> str:
+  async def canonical_global_instruction(
+      self, ctx: ReadonlyContext
+  ) -> tuple[str, bool]:
     """The resolved self.instruction field to construct global instruction.
 
     This method is only for use by Agent Development Kit.
+
+    Args:
+      ctx: The context to retrieve the session state.
+
+    Returns:
+      A tuple of (instruction, bypass_state_injection).
+      instruction: The resolved self.global_instruction field.
+      bypass_state_injection: Whether the instruction is based on
+      InstructionProvider.
     """
     if isinstance(self.global_instruction, str):
-      return self.global_instruction
+      return self.global_instruction, False
     else:
       global_instruction = self.global_instruction(ctx)
       if inspect.isawaitable(global_instruction):
         global_instruction = await global_instruction
-      return global_instruction
+      return global_instruction, True
 
   async def canonical_tools(
       self, ctx: ReadonlyContext = None
@@ -412,16 +435,31 @@ class LlmAgent(BaseAgent):
 
   def __maybe_save_output_to_state(self, event: Event):
     """Saves the model output to state if needed."""
+    # skip if the event was authored by some other agent (e.g. current agent
+    # transferred to another agent)
+    if event.author != self.name:
+      logger.debug(
+          'Skipping output save for agent %s: event authored by %s',
+          self.name,
+          event.author,
+      )
+      return
     if (
         self.output_key
         and event.is_final_response()
         and event.content
         and event.content.parts
     ):
+
       result = ''.join(
           [part.text if part.text else '' for part in event.content.parts]
       )
       if self.output_schema:
+        # If the result from the final chunk is just whitespace or empty,
+        # it means this is an empty final chunk of a stream.
+        # Do not attempt to parse it as JSON.
+        if not result.strip():
+          return
         result = self.output_schema.model_validate_json(result).model_dump(
             exclude_none=True
         )
@@ -482,5 +520,55 @@ class LlmAgent(BaseAgent):
       )
     return generate_content_config
 
+  @classmethod
+  @override
+  @working_in_progress('LlmAgent.from_config is not ready for use.')
+  def from_config(
+      cls: Type[LlmAgent],
+      config: LlmAgentConfig,
+      config_abs_path: str,
+  ) -> LlmAgent:
+    agent = super().from_config(config, config_abs_path)
+    if config.model:
+      agent.model = config.model
+    if config.instruction:
+      agent.instruction = config.instruction
+    if config.disallow_transfer_to_parent:
+      agent.disallow_transfer_to_parent = config.disallow_transfer_to_parent
+    if config.disallow_transfer_to_peers:
+      agent.disallow_transfer_to_peers = config.disallow_transfer_to_peers
+    if config.include_contents != 'default':
+      agent.include_contents = config.include_contents
+    if config.output_key:
+      agent.output_key = config.output_key
+    return agent
+
 
 Agent: TypeAlias = LlmAgent
+
+
+class LlmAgentConfig(BaseAgentConfig):
+  """The config for the YAML schema of a LlmAgent."""
+
+  agent_class: Literal['LlmAgent', ''] = 'LlmAgent'
+  """The value is used to uniquely identify the LlmAgent class. If it is
+  empty, it is by default an LlmAgent."""
+
+  model: Optional[str] = None
+  """Optional. LlmAgent.model. If not set, the model will be inherited from
+  the ancestor."""
+
+  instruction: str
+  """Required. LlmAgent.instruction."""
+
+  disallow_transfer_to_parent: Optional[bool] = None
+  """Optional. LlmAgent.disallow_transfer_to_parent."""
+
+  disallow_transfer_to_peers: Optional[bool] = None
+  """Optional. LlmAgent.disallow_transfer_to_peers."""
+
+  output_key: Optional[str] = None
+  """Optional. LlmAgent.output_key."""
+
+  include_contents: Literal['default', 'none'] = 'default'
+  """Optional. LlmAgent.include_contents."""

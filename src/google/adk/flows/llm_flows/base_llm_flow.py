@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from abc import ABC
 import asyncio
+import datetime
 import inspect
 import logging
 from typing import AsyncGenerator
@@ -23,8 +24,10 @@ from typing import cast
 from typing import Optional
 from typing import TYPE_CHECKING
 
+from google.genai import types
 from websockets.exceptions import ConnectionClosedOK
 
+from . import functions
 from ...agents.base_agent import BaseAgent
 from ...agents.callback_context import CallbackContext
 from ...agents.invocation_context import InvocationContext
@@ -40,7 +43,6 @@ from ...telemetry import trace_call_llm
 from ...telemetry import trace_send_data
 from ...telemetry import tracer
 from ...tools.tool_context import ToolContext
-from . import functions
 
 if TYPE_CHECKING:
   from ...agents.llm_agent import LlmAgent
@@ -48,7 +50,9 @@ if TYPE_CHECKING:
   from ._base_llm_processor import BaseLlmRequestProcessor
   from ._base_llm_processor import BaseLlmResponseProcessor
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('google_adk.' + __name__)
+
+_ADK_AGENT_NAME_LABEL_KEY = 'adk_agent_name'
 
 
 class BaseLlmFlow(ABC):
@@ -279,7 +283,9 @@ class BaseLlmFlow(ABC):
       async for event in self._run_one_step_async(invocation_context):
         last_event = event
         yield event
-      if not last_event or last_event.is_final_response():
+      if not last_event or last_event.is_final_response() or last_event.partial:
+        if last_event and last_event.partial:
+          logger.warning('The last event is partial, which is not expected.')
         break
 
   async def _run_one_step_async(
@@ -311,6 +317,7 @@ class BaseLlmFlow(ABC):
       ):
         # Update the mutable event id to avoid conflict
         model_response_event.id = Event.new_id()
+        model_response_event.timestamp = datetime.datetime.now().timestamp()
         yield event
 
   async def _preprocess_async(
@@ -472,14 +479,12 @@ class BaseLlmFlow(ABC):
           yield event
 
   def _get_agent_to_run(
-      self, invocation_context: InvocationContext, transfer_to_agent
+      self, invocation_context: InvocationContext, agent_name: str
   ) -> BaseAgent:
     root_agent = invocation_context.agent.root_agent
-    agent_to_run = root_agent.find_agent(transfer_to_agent)
+    agent_to_run = root_agent.find_agent(agent_name)
     if not agent_to_run:
-      raise ValueError(
-          f'Agent {transfer_to_agent} not found in the agent tree.'
-      )
+      raise ValueError(f'Agent {agent_name} not found in the agent tree.')
     return agent_to_run
 
   async def _call_llm_async(
@@ -494,6 +499,16 @@ class BaseLlmFlow(ABC):
     ):
       yield response
       return
+
+    llm_request.config = llm_request.config or types.GenerateContentConfig()
+    llm_request.config.labels = llm_request.config.labels or {}
+
+    # Add agent name as a label to the llm_request. This will help with slicing
+    # the billing reports on a per-agent basis.
+    if _ADK_AGENT_NAME_LABEL_KEY not in llm_request.config.labels:
+      llm_request.config.labels[_ADK_AGENT_NAME_LABEL_KEY] = (
+          invocation_context.agent.name
+      )
 
     # Calls the LLM.
     llm = self.__get_llm(invocation_context)
@@ -550,21 +565,32 @@ class BaseLlmFlow(ABC):
     if not isinstance(agent, LlmAgent):
       return
 
-    if not agent.canonical_before_model_callbacks:
-      return
-
     callback_context = CallbackContext(
         invocation_context, event_actions=model_response_event.actions
     )
 
+    # First run callbacks from the plugins.
+    callback_response = (
+        await invocation_context.plugin_manager.run_before_model_callback(
+            callback_context=callback_context,
+            llm_request=llm_request,
+        )
+    )
+    if callback_response:
+      return callback_response
+
+    # If no overrides are provided from the plugins, further run the canonical
+    # callbacks.
+    if not agent.canonical_before_model_callbacks:
+      return
     for callback in agent.canonical_before_model_callbacks:
-      before_model_callback_content = callback(
+      callback_response = callback(
           callback_context=callback_context, llm_request=llm_request
       )
-      if inspect.isawaitable(before_model_callback_content):
-        before_model_callback_content = await before_model_callback_content
-      if before_model_callback_content:
-        return before_model_callback_content
+      if inspect.isawaitable(callback_response):
+        callback_response = await callback_response
+      if callback_response:
+        return callback_response
 
   async def _handle_after_model_callback(
       self,
@@ -578,21 +604,32 @@ class BaseLlmFlow(ABC):
     if not isinstance(agent, LlmAgent):
       return
 
-    if not agent.canonical_after_model_callbacks:
-      return
-
     callback_context = CallbackContext(
         invocation_context, event_actions=model_response_event.actions
     )
 
+    # First run callbacks from the plugins.
+    callback_response = (
+        await invocation_context.plugin_manager.run_after_model_callback(
+            callback_context=CallbackContext(invocation_context),
+            llm_response=llm_response,
+        )
+    )
+    if callback_response:
+      return callback_response
+
+    # If no overrides are provided from the plugins, further run the canonical
+    # callbacks.
+    if not agent.canonical_after_model_callbacks:
+      return
     for callback in agent.canonical_after_model_callbacks:
-      after_model_callback_content = callback(
+      callback_response = callback(
           callback_context=callback_context, llm_response=llm_response
       )
-      if inspect.isawaitable(after_model_callback_content):
-        after_model_callback_content = await after_model_callback_content
-      if after_model_callback_content:
-        return after_model_callback_content
+      if inspect.isawaitable(callback_response):
+        callback_response = await callback_response
+      if callback_response:
+        return callback_response
 
   def _finalize_model_response_event(
       self,

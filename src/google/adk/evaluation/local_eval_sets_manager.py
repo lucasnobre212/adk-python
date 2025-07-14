@@ -12,16 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import re
 import time
 from typing import Any
+from typing import Optional
 import uuid
+
 from google.genai import types as genai_types
 from pydantic import ValidationError
 from typing_extensions import override
+
+from ._eval_sets_manager_utils import add_eval_case_to_eval_set
+from ._eval_sets_manager_utils import delete_eval_case_from_eval_set
+from ._eval_sets_manager_utils import get_eval_case_from_eval_set
+from ._eval_sets_manager_utils import get_eval_set_from_app_and_id
+from ._eval_sets_manager_utils import update_eval_case_in_eval_set
 from .eval_case import EvalCase
 from .eval_case import IntermediateData
 from .eval_case import Invocation
@@ -29,7 +39,7 @@ from .eval_case import SessionInput
 from .eval_set import EvalSet
 from .eval_sets_manager import EvalSetsManager
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("google_adk." + __name__)
 
 _EVAL_SET_FILE_EXTENSION = ".evalset.json"
 
@@ -37,9 +47,9 @@ _EVAL_SET_FILE_EXTENSION = ".evalset.json"
 def _convert_invocation_to_pydantic_schema(
     invocation_in_json_format: dict[str, Any],
 ) -> Invocation:
-  """Converts an invocation from old json format to new Pydantic Schema"""
+  """Converts an invocation from old json format to new Pydantic Schema."""
   query = invocation_in_json_format["query"]
-  reference = invocation_in_json_format["reference"]
+  reference = invocation_in_json_format.get("reference", "")
   expected_tool_use = []
   expected_intermediate_agent_responses = []
 
@@ -180,15 +190,18 @@ def load_eval_set_from_file(
 class LocalEvalSetsManager(EvalSetsManager):
   """An EvalSets manager that stores eval sets locally on disk."""
 
-  def __init__(self, agent_dir: str):
-    self._agent_dir = agent_dir
+  def __init__(self, agents_dir: str):
+    self._agents_dir = agents_dir
 
   @override
-  def get_eval_set(self, app_name: str, eval_set_id: str) -> EvalSet:
+  def get_eval_set(self, app_name: str, eval_set_id: str) -> Optional[EvalSet]:
     """Returns an EvalSet identified by an app_name and eval_set_id."""
     # Load the eval set file data
-    eval_set_file_path = self._get_eval_set_file_path(app_name, eval_set_id)
-    return load_eval_set_from_file(eval_set_file_path, eval_set_id)
+    try:
+      eval_set_file_path = self._get_eval_set_file_path(app_name, eval_set_id)
+      return load_eval_set_from_file(eval_set_file_path, eval_set_id)
+    except FileNotFoundError:
+      return None
 
   @override
   def create_eval_set(self, app_name: str, eval_set_id: str):
@@ -209,12 +222,12 @@ class LocalEvalSetsManager(EvalSetsManager):
           eval_cases=[],
           creation_timestamp=time.time(),
       )
-      self._write_eval_set(new_eval_set_path, new_eval_set)
+      self._write_eval_set_to_path(new_eval_set_path, new_eval_set)
 
   @override
   def list_eval_sets(self, app_name: str) -> list[str]:
     """Returns a list of EvalSets that belong to the given app_name."""
-    eval_set_file_path = os.path.join(self._agent_dir, app_name)
+    eval_set_file_path = os.path.join(self._agents_dir, app_name)
     eval_sets = []
     for file in os.listdir(eval_set_file_path):
       if file.endswith(_EVAL_SET_FILE_EXTENSION):
@@ -225,27 +238,56 @@ class LocalEvalSetsManager(EvalSetsManager):
     return sorted(eval_sets)
 
   @override
-  def add_eval_case(self, app_name: str, eval_set_id: str, eval_case: EvalCase):
-    """Adds the given EvalCase to an existing EvalSet identified by app_name and eval_set_id."""
-    eval_case_id = eval_case.eval_id
-    self._validate_id(id_name="Eval Case Id", id_value=eval_case_id)
-
+  def get_eval_case(
+      self, app_name: str, eval_set_id: str, eval_case_id: str
+  ) -> Optional[EvalCase]:
+    """Returns an EvalCase if found, otherwise None."""
     eval_set = self.get_eval_set(app_name, eval_set_id)
+    if not eval_set:
+      return None
+    return get_eval_case_from_eval_set(eval_set, eval_case_id)
 
-    if [x for x in eval_set.eval_cases if x.eval_id == eval_case_id]:
-      raise ValueError(
-          f"Eval id `{eval_case_id}` already exists in `{eval_set_id}`"
-          " eval set.",
-      )
+  @override
+  def add_eval_case(self, app_name: str, eval_set_id: str, eval_case: EvalCase):
+    """Adds the given EvalCase to an existing EvalSet identified by app_name and eval_set_id.
 
-    eval_set.eval_cases.append(eval_case)
+    Raises:
+      NotFoundError: If the eval set is not found.
+    """
+    eval_set = get_eval_set_from_app_and_id(self, app_name, eval_set_id)
+    updated_eval_set = add_eval_case_to_eval_set(eval_set, eval_case)
 
-    eval_set_file_path = self._get_eval_set_file_path(app_name, eval_set_id)
-    self._write_eval_set(eval_set_file_path, eval_set)
+    self._save_eval_set(app_name, eval_set_id, updated_eval_set)
+
+  @override
+  def update_eval_case(
+      self, app_name: str, eval_set_id: str, updated_eval_case: EvalCase
+  ):
+    """Updates an existing EvalCase give the app_name and eval_set_id.
+
+    Raises:
+      NotFoundError: If the eval set or the eval case is not found.
+    """
+    eval_set = get_eval_set_from_app_and_id(self, app_name, eval_set_id)
+    updated_eval_set = update_eval_case_in_eval_set(eval_set, updated_eval_case)
+    self._save_eval_set(app_name, eval_set_id, updated_eval_set)
+
+  @override
+  def delete_eval_case(
+      self, app_name: str, eval_set_id: str, eval_case_id: str
+  ):
+    """Deletes the given EvalCase identified by app_name, eval_set_id and eval_case_id.
+
+    Raises:
+      NotFoundError: If the eval set or the eval case to delete is not found.
+    """
+    eval_set = get_eval_set_from_app_and_id(self, app_name, eval_set_id)
+    updated_eval_set = delete_eval_case_from_eval_set(eval_set, eval_case_id)
+    self._save_eval_set(app_name, eval_set_id, updated_eval_set)
 
   def _get_eval_set_file_path(self, app_name: str, eval_set_id: str) -> str:
     return os.path.join(
-        self._agent_dir,
+        self._agents_dir,
         app_name,
         eval_set_id + _EVAL_SET_FILE_EXTENSION,
     )
@@ -257,6 +299,10 @@ class LocalEvalSetsManager(EvalSetsManager):
           f"Invalid {id_name}. {id_name} should have the `{pattern}` format",
       )
 
-  def _write_eval_set(self, eval_set_path: str, eval_set: EvalSet):
+  def _write_eval_set_to_path(self, eval_set_path: str, eval_set: EvalSet):
     with open(eval_set_path, "w") as f:
       f.write(eval_set.model_dump_json(indent=2))
+
+  def _save_eval_set(self, app_name: str, eval_set_id: str, eval_set: EvalSet):
+    eval_set_file_path = self._get_eval_set_file_path(app_name, eval_set_id)
+    self._write_eval_set_to_path(eval_set_file_path, eval_set)

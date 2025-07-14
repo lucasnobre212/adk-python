@@ -12,8 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
 
 from pydantic import alias_generators
 from pydantic import BaseModel
@@ -72,6 +77,8 @@ class OAuth2Auth(BaseModelWithConfig):
   auth_code: Optional[str] = None
   access_token: Optional[str] = None
   refresh_token: Optional[str] = None
+  expires_at: Optional[int] = None
+  expires_in: Optional[int] = None
 
 
 class ServiceAccountCredential(BaseModelWithConfig):

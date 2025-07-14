@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import importlib.util
 import json
 import logging
@@ -22,105 +24,24 @@ from typing import AsyncGenerator
 from typing import Optional
 import uuid
 
-from pydantic import BaseModel
-from pydantic import Field
-
 from ..agents import Agent
 from ..artifacts.base_artifact_service import BaseArtifactService
+from ..evaluation.constants import MISSING_EVAL_DEPENDENCIES_MESSAGE
 from ..evaluation.eval_case import EvalCase
-from ..evaluation.eval_case import Invocation
+from ..evaluation.eval_metrics import EvalMetric
+from ..evaluation.eval_metrics import EvalMetricResult
+from ..evaluation.eval_metrics import EvalMetricResultPerInvocation
+from ..evaluation.eval_result import EvalCaseResult
 from ..evaluation.evaluator import EvalStatus
 from ..evaluation.evaluator import Evaluator
 from ..sessions.base_session_service import BaseSessionService
-from ..sessions.session import Session
-from .utils import common
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("google_adk." + __name__)
 
 
-class EvalMetric(common.BaseModel):
-  """A metric used to evaluate a particular aspect of an eval case."""
-
-  metric_name: str
-  """The name of the metric."""
-
-  threshold: float
-  """A threshold value. Each metric decides how to interpret this threshold."""
-
-
-class EvalMetricResult(EvalMetric):
-  """The actual computed score/value of a particular EvalMetric."""
-
-  score: Optional[float] = None
-  eval_status: EvalStatus
-
-
-class EvalMetricResultPerInvocation(common.BaseModel):
-  """Eval metric results per invocation."""
-
-  actual_invocation: Invocation
-  """The actual invocation, usually obtained by inferencing the agent."""
-
-  expected_invocation: Invocation
-  """The expected invocation, usually the reference or golden invocation."""
-
-  eval_metric_results: list[EvalMetricResult] = []
-  """Eval resutls for each applicable metric."""
-
-
-class EvalCaseResult(common.BaseModel):
-  """Case-level evaluation results."""
-
-  eval_set_file: str = Field(
-      deprecated=True,
-      description="This field is deprecated, use eval_set_id instead.",
-  )
-  eval_set_id: str = ""
-  """The eval set id."""
-
-  eval_id: str = ""
-  """The eval case id."""
-
-  final_eval_status: EvalStatus
-  """Final evalu status for this eval case."""
-
-  eval_metric_results: list[tuple[EvalMetric, EvalMetricResult]] = Field(
-      deprecated=True,
-      description=(
-          "This field is deprecated, use overall_eval_metric_results instead."
-      ),
-  )
-
-  overall_eval_metric_results: list[EvalMetricResult]
-  """Overall result for each metric for the entire eval case."""
-
-  eval_metric_result_per_invocation: list[EvalMetricResultPerInvocation]
-  """Result for each metric on a per invocation basis."""
-
-  session_id: str
-  """Session id of the session generated as result of inferencing/scraping stage of the eval."""
-
-  session_details: Optional[Session] = None
-  """Session generated as result of inferencing/scraping stage of the eval."""
-
-  user_id: Optional[str] = None
-  """User id used during inferencing/scraping stage of the eval."""
-
-
-class EvalSetResult(common.BaseModel):
-  eval_set_result_id: str
-  eval_set_result_name: str
-  eval_set_id: str
-  eval_case_results: list[EvalCaseResult] = Field(default_factory=list)
-  creation_timestamp: float = 0.0
-
-
-MISSING_EVAL_DEPENDENCIES_MESSAGE = (
-    "Eval module is not installed, please install via `pip install"
-    " google-adk[eval]`."
-)
 TOOL_TRAJECTORY_SCORE_KEY = "tool_trajectory_avg_score"
 RESPONSE_MATCH_SCORE_KEY = "response_match_score"
+SAFETY_V1_KEY = "safety_v1"
 # This evaluation is not very stable.
 # This is always optional unless explicitly specified.
 RESPONSE_EVALUATION_SCORE_KEY = "response_evaluation_score"
@@ -227,9 +148,7 @@ async def run_evals(
     artifact_service: The artifact service to use during inferencing.
   """
   try:
-    from ..evaluation.agent_evaluator import EvaluationGenerator
-    from ..evaluation.response_evaluator import ResponseEvaluator
-    from ..evaluation.trajectory_evaluator import TrajectoryEvaluator
+    from ..evaluation.evaluation_generator import EvaluationGenerator
   except ModuleNotFoundError as e:
     raise ModuleNotFoundError(MISSING_EVAL_DEPENDENCIES_MESSAGE) from e
 
@@ -331,7 +250,8 @@ async def run_evals(
           result = "❌ Failed"
 
         print(f"Result: {result}\n")
-
+      except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(MISSING_EVAL_DEPENDENCIES_MESSAGE) from e
       except Exception:
         # Catching the general exception, so that we don't block other eval
         # cases.
@@ -341,6 +261,7 @@ async def run_evals(
 def _get_evaluator(eval_metric: EvalMetric) -> Evaluator:
   try:
     from ..evaluation.response_evaluator import ResponseEvaluator
+    from ..evaluation.safety_evaluator import SafetyEvaluatorV1
     from ..evaluation.trajectory_evaluator import TrajectoryEvaluator
   except ModuleNotFoundError as e:
     raise ModuleNotFoundError(MISSING_EVAL_DEPENDENCIES_MESSAGE) from e
@@ -353,5 +274,7 @@ def _get_evaluator(eval_metric: EvalMetric) -> Evaluator:
     return ResponseEvaluator(
         threshold=eval_metric.threshold, metric_name=eval_metric.metric_name
     )
+  elif eval_metric.metric_name == SAFETY_V1_KEY:
+    return SafetyEvaluatorV1(eval_metric)
 
   raise ValueError(f"Unsupported eval metric: {eval_metric}")

@@ -14,7 +14,11 @@
 
 import json
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
 
 import google.auth
 from google.auth import default as default_service_credential
@@ -247,6 +251,12 @@ class ConnectionsClient:
                     "description": (
                         "Timeout in seconds for execution of custom query"
                     ),
+                },
+                "sortByColumns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Column to sort the results by",
                 },
                 "connectorOutputPayload": {"type": "object"},
                 "nextPageToken": {"type": "string"},
@@ -554,6 +564,9 @@ class ConnectionsClient:
             "serviceName": {"$ref": "#/components/schemas/serviceName"},
             "host": {"$ref": "#/components/schemas/host"},
             "entity": {"$ref": "#/components/schemas/entity"},
+            "dynamicAuthConfig": {
+                "$ref": "#/components/schemas/dynamicAuthConfig"
+            },
         },
     }
 
@@ -580,6 +593,9 @@ class ConnectionsClient:
             "serviceName": {"$ref": "#/components/schemas/serviceName"},
             "host": {"$ref": "#/components/schemas/host"},
             "entity": {"$ref": "#/components/schemas/entity"},
+            "dynamicAuthConfig": {
+                "$ref": "#/components/schemas/dynamicAuthConfig"
+            },
             "filterClause": {"$ref": "#/components/schemas/filterClause"},
         },
     }
@@ -603,6 +619,9 @@ class ConnectionsClient:
             "serviceName": {"$ref": "#/components/schemas/serviceName"},
             "host": {"$ref": "#/components/schemas/host"},
             "entity": {"$ref": "#/components/schemas/entity"},
+            "dynamicAuthConfig": {
+                "$ref": "#/components/schemas/dynamicAuthConfig"
+            },
         },
     }
 
@@ -625,6 +644,9 @@ class ConnectionsClient:
             "serviceName": {"$ref": "#/components/schemas/serviceName"},
             "host": {"$ref": "#/components/schemas/host"},
             "entity": {"$ref": "#/components/schemas/entity"},
+            "dynamicAuthConfig": {
+                "$ref": "#/components/schemas/dynamicAuthConfig"
+            },
             "filterClause": {"$ref": "#/components/schemas/filterClause"},
         },
     }
@@ -649,6 +671,10 @@ class ConnectionsClient:
             "serviceName": {"$ref": "#/components/schemas/serviceName"},
             "host": {"$ref": "#/components/schemas/host"},
             "entity": {"$ref": "#/components/schemas/entity"},
+            "sortByColumns": {"$ref": "#/components/schemas/sortByColumns"},
+            "dynamicAuthConfig": {
+                "$ref": "#/components/schemas/dynamicAuthConfig"
+            },
         },
     }
 
@@ -672,6 +698,9 @@ class ConnectionsClient:
             "action": {"$ref": "#/components/schemas/action"},
             "connectorInputPayload": {
                 "$ref": f"#/components/schemas/connectorInputPayload_{action}"
+            },
+            "dynamicAuthConfig": {
+                "$ref": "#/components/schemas/dynamicAuthConfig"
             },
         },
     }
@@ -710,6 +739,9 @@ class ConnectionsClient:
             "query": {"$ref": "#/components/schemas/query"},
             "timeout": {"$ref": "#/components/schemas/timeout"},
             "pageSize": {"$ref": "#/components/schemas/pageSize"},
+            "dynamicAuthConfig": {
+                "$ref": "#/components/schemas/dynamicAuthConfig"
+            },
         },
     }
 

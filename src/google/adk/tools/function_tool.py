@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import inspect
 from typing import Any
 from typing import Callable
@@ -33,8 +35,31 @@ class FunctionTool(BaseTool):
   """
 
   def __init__(self, func: Callable[..., Any]):
-    super().__init__(name=func.__name__, description=func.__doc__)
+    """Extract metadata from a callable object."""
+    name = ''
+    doc = ''
+    # Handle different types of callables
+    if hasattr(func, '__name__'):
+      # Regular functions, unbound methods, etc.
+      name = func.__name__
+    elif hasattr(func, '__class__'):
+      # Callable objects, bound methods, etc.
+      name = func.__class__.__name__
+
+    # Get documentation (prioritize direct __doc__ if available)
+    if hasattr(func, '__doc__') and func.__doc__:
+      doc = inspect.cleandoc(func.__doc__)
+    elif (
+        hasattr(func, '__call__')
+        and hasattr(func.__call__, '__doc__')
+        and func.__call__.__doc__
+    ):
+      # For callable objects, try to get docstring from __call__ method
+      doc = inspect.cleandoc(func.__call__.__doc__)
+
+    super().__init__(name=name, description=doc)
     self.func = func
+    self._ignore_params = ['tool_context', 'input_stream']
 
   @override
   def _get_declaration(self) -> Optional[types.FunctionDeclaration]:
@@ -43,7 +68,7 @@ class FunctionTool(BaseTool):
             func=self.func,
             # The model doesn't understand the function context.
             # input_stream is for streaming tool
-            ignore_params=['tool_context', 'input_stream'],
+            ignore_params=self._ignore_params,
             variant=self._api_variant,
         )
     )
@@ -56,8 +81,12 @@ class FunctionTool(BaseTool):
   ) -> Any:
     args_to_call = args.copy()
     signature = inspect.signature(self.func)
-    if 'tool_context' in signature.parameters:
+    valid_params = {param for param in signature.parameters}
+    if 'tool_context' in valid_params:
       args_to_call['tool_context'] = tool_context
+
+    # Filter args_to_call to only include valid parameters for the function
+    args_to_call = {k: v for k, v in args_to_call.items() if k in valid_params}
 
     # Before invoking the function, we check for if the list of args passed in
     # has all the mandatory arguments or not.
@@ -76,10 +105,17 @@ class FunctionTool(BaseTool):
 You could retry calling this tool, but it is IMPORTANT for you to provide all the mandatory parameters."""
       return {'error': error_str}
 
-    if inspect.iscoroutinefunction(self.func):
-      return await self.func(**args_to_call) or {}
+    # Functions are callable objects, but not all callable objects are functions
+    # checking coroutine function is not enough. We also need to check whether
+    # Callable's __call__ function is a coroutine funciton
+    if (
+        inspect.iscoroutinefunction(self.func)
+        or hasattr(self.func, '__call__')
+        and inspect.iscoroutinefunction(self.func.__call__)
+    ):
+      return await self.func(**args_to_call)
     else:
-      return self.func(**args_to_call) or {}
+      return self.func(**args_to_call)
 
   # TODO(hangfei): fix call live for function stream.
   async def _call_live(
