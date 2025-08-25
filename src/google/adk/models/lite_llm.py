@@ -380,7 +380,7 @@ def _function_declaration_to_tool_param(
     for key, value in function_declaration.parameters.properties.items():
       properties[key] = _schema_to_dict(value)
 
-  return {
+  tool_params = {
       "type": "function",
       "function": {
           "name": function_declaration.name,
@@ -391,6 +391,13 @@ def _function_declaration_to_tool_param(
           },
       },
   }
+
+  if function_declaration.parameters.required:
+    tool_params["function"]["parameters"][
+        "required"
+    ] = function_declaration.parameters.required
+
+  return tool_params
 
 
 def _model_response_to_chunk(
@@ -848,9 +855,9 @@ class LiteLlm(BaseLlm):
       response = await self.llm_client.acompletion(**completion_args)
       yield _model_response_to_generate_content_response(response)
 
-  @staticmethod
+  @classmethod
   @override
-  def supported_models() -> list[str]:
+  def supported_models(cls) -> list[str]:
     """Provides the list of supported models.
 
     LiteLlm supports all models supported by litellm. We do not keep track of
