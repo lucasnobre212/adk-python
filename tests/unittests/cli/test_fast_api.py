@@ -32,7 +32,9 @@ from google.adk.evaluation.eval_case import EvalCase
 from google.adk.evaluation.eval_case import Invocation
 from google.adk.evaluation.eval_result import EvalSetResult
 from google.adk.evaluation.eval_set import EvalSet
-from google.adk.events import Event
+from google.adk.evaluation.in_memory_eval_sets_manager import InMemoryEvalSetsManager
+from google.adk.events.event import Event
+from google.adk.events.event_actions import EventActions
 from google.adk.runners import Runner
 from google.adk.sessions.base_session_service import ListSessionsResponse
 from google.genai import types
@@ -93,6 +95,14 @@ def _event_3():
   )
 
 
+def _event_state_delta(state_delta: dict[str, Any]):
+  return Event(
+      author="dummy agent",
+      invocation_id="invocation_id",
+      actions=EventActions(state_delta=state_delta),
+  )
+
+
 # Define mocked async generator functions for the Runner
 async def dummy_run_live(self, session, live_request_queue):
   yield _event_1()
@@ -109,6 +119,7 @@ async def dummy_run_async(
     user_id,
     session_id,
     new_message,
+    state_delta=None,
     run_config: RunConfig = RunConfig(),
 ):
   yield _event_1()
@@ -118,6 +129,10 @@ async def dummy_run_async(
   await asyncio.sleep(0)
 
   yield _event_3()
+  await asyncio.sleep(0)
+
+  if state_delta is not None:
+    yield _event_state_delta(state_delta)
 
 
 # Define a local mock for EvalCaseResult specific to fast_api tests
@@ -187,6 +202,9 @@ def mock_agent_loader():
 
     def load_agent(self, app_name):
       return root_agent
+
+    def list_agents(self):
+      return ["test_app"]
 
   return MockAgentLoader(".")
 
@@ -330,49 +348,7 @@ def mock_memory_service():
 @pytest.fixture
 def mock_eval_sets_manager():
   """Create a mock eval sets manager."""
-
-  # Storage for eval sets.
-  eval_sets = {}
-
-  class MockEvalSetsManager:
-    """Mock eval sets manager."""
-
-    def create_eval_set(self, app_name, eval_set_id):
-      """Create an eval set."""
-      if app_name not in eval_sets:
-        eval_sets[app_name] = {}
-
-      if eval_set_id in eval_sets[app_name]:
-        raise ValueError(f"Eval set {eval_set_id} already exists.")
-
-      eval_sets[app_name][eval_set_id] = EvalSet(
-          eval_set_id=eval_set_id, eval_cases=[]
-      )
-      return eval_set_id
-
-    def get_eval_set(self, app_name, eval_set_id):
-      """Get an eval set."""
-      if app_name not in eval_sets:
-        raise ValueError(f"App {app_name} not found.")
-      if eval_set_id not in eval_sets[app_name]:
-        raise ValueError(f"Eval set {eval_set_id} not found in app {app_name}.")
-      return eval_sets[app_name][eval_set_id]
-
-    def list_eval_sets(self, app_name):
-      """List eval sets."""
-      if app_name not in eval_sets:
-        raise ValueError(f"App {app_name} not found.")
-      return list(eval_sets[app_name].keys())
-
-    def add_eval_case(self, app_name, eval_set_id, eval_case):
-      """Add an eval case to an eval set."""
-      if app_name not in eval_sets:
-        raise ValueError(f"App {app_name} not found.")
-      if eval_set_id not in eval_sets[app_name]:
-        raise ValueError(f"Eval set {eval_set_id} not found in app {app_name}.")
-      eval_sets[app_name][eval_set_id].eval_cases.append(eval_case)
-
-  return MockEvalSetsManager()
+  return InMemoryEvalSetsManager()
 
 
 @pytest.fixture
@@ -782,6 +758,29 @@ def test_agent_run(test_app, create_test_session):
   logger.info("Agent run test completed successfully")
 
 
+def test_agent_run_passes_state_delta(test_app, create_test_session):
+  """Test /run forwards state_delta and surfaces it in events."""
+  info = create_test_session
+  payload = {
+      "app_name": info["app_name"],
+      "user_id": info["user_id"],
+      "session_id": info["session_id"],
+      "new_message": {"role": "user", "parts": [{"text": "Hello"}]},
+      "streaming": False,
+      "state_delta": {"k": "v", "count": 1},
+  }
+
+  # Verify the response
+  response = test_app.post("/run", json=payload)
+  assert response.status_code == 200
+  data = response.json()
+  assert isinstance(data, list)
+  assert len(data) == 4
+
+  # Verify we got the expected event
+  assert data[3]["actions"]["stateDelta"] == payload["state_delta"]
+
+
 def test_list_artifact_names(test_app, create_test_session):
   """Test listing artifact names for a session."""
   info = create_test_session
@@ -881,6 +880,25 @@ def test_run_eval(test_app, create_test_eval_set):
   assert response.status_code == 200
   data = response.json()
   assert data == [f"{info['app_name']}_test_eval_set_id_eval_result"]
+
+
+def test_list_metrics_info(test_app):
+  """Test listing metrics info."""
+  url = "/apps/test_app/metrics-info"
+  response = test_app.get(url)
+
+  # Verify the response
+  assert response.status_code == 200
+  data = response.json()
+  metrics_info_key = "metricsInfo"
+  assert metrics_info_key in data
+  assert isinstance(data[metrics_info_key], list)
+  # Add more assertions based on the expected metrics
+  assert len(data[metrics_info_key]) > 0
+  for metric in data[metrics_info_key]:
+    assert "metricName" in metric
+    assert "description" in metric
+    assert "metricValueInfo" in metric
 
 
 def test_debug_trace(test_app):

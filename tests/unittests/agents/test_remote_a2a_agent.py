@@ -20,7 +20,14 @@ from unittest.mock import AsyncMock
 from unittest.mock import Mock
 from unittest.mock import patch
 
-# Try to import a2a library - will fail on Python < 3.10
+import pytest
+
+# Skip all tests in this module if Python version is less than 3.10
+pytestmark = pytest.mark.skipif(
+    sys.version_info < (3, 10), reason="A2A requires Python 3.10+"
+)
+
+# Import dependencies with version checking
 try:
   from a2a.types import AgentCapabilities
   from a2a.types import AgentCard
@@ -32,32 +39,31 @@ try:
   from google.adk.agents.remote_a2a_agent import A2A_METADATA_PREFIX
   from google.adk.agents.remote_a2a_agent import AgentCardResolutionError
   from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
+except ImportError as e:
+  if sys.version_info < (3, 10):
+    # Create dummy classes to prevent NameError during module compilation.
+    # These are needed because the module has type annotations and module-level
+    # helper functions that reference imported types.
+    class DummyTypes:
+      pass
 
-  A2A_AVAILABLE = True
-except ImportError:
-  A2A_AVAILABLE = False
-  # Create dummy classes to prevent NameError during test collection
-  AgentCapabilities = type("AgentCapabilities", (), {})
-  AgentCard = type("AgentCard", (), {})
-  AgentSkill = type("AgentSkill", (), {})
-  A2AMessage = type("A2AMessage", (), {})
-  SendMessageSuccessResponse = type("SendMessageSuccessResponse", (), {})
-  A2ATask = type("A2ATask", (), {})
+    AgentCapabilities = DummyTypes()
+    AgentCard = DummyTypes()
+    AgentSkill = DummyTypes()
+    A2AMessage = DummyTypes()
+    SendMessageSuccessResponse = DummyTypes()
+    A2ATask = DummyTypes()
+    InvocationContext = DummyTypes()
+    RemoteA2aAgent = DummyTypes()
+    AgentCardResolutionError = Exception
+    A2A_METADATA_PREFIX = ""
+  else:
+    raise e
 
 
 from google.adk.events.event import Event
 from google.adk.sessions.session import Session
 import httpx
-import pytest
-
-# Skip all tests in this module if Python < 3.10 or a2a library is not available
-pytestmark = pytest.mark.skipif(
-    sys.version_info < (3, 10) or not A2A_AVAILABLE,
-    reason=(
-        "a2a library requires Python 3.10+ and is not available, skipping"
-        " RemoteA2aAgent tests"
-    ),
-)
 
 
 # Helper function to create a proper AgentCard for testing
@@ -73,8 +79,8 @@ def create_test_agent_card(
       description=description,
       version="1.0",
       capabilities=AgentCapabilities(),
-      defaultInputModes=["text/plain"],
-      defaultOutputModes=["application/json"],
+      default_input_modes=["text/plain"],
+      default_output_modes=["application/json"],
       skills=[
           AgentSkill(
               id="test-skill",
@@ -316,8 +322,8 @@ class TestRemoteA2aAgentResolution:
         description="test",
         version="1.0",
         capabilities=AgentCapabilities(),
-        defaultInputModes=["text/plain"],
-        defaultOutputModes=["application/json"],
+        default_input_modes=["text/plain"],
+        default_output_modes=["application/json"],
         skills=[
             AgentSkill(
                 id="test-skill",
@@ -347,8 +353,8 @@ class TestRemoteA2aAgentResolution:
         description="test",
         version="1.0",
         capabilities=AgentCapabilities(),
-        defaultInputModes=["text/plain"],
-        defaultOutputModes=["application/json"],
+        default_input_modes=["text/plain"],
+        default_output_modes=["application/json"],
         skills=[
             AgentSkill(
                 id="test-skill",
@@ -435,7 +441,14 @@ class TestRemoteA2aAgentMessageHandling:
   def setup_method(self):
     """Setup test fixtures."""
     self.agent_card = create_test_agent_card()
-    self.agent = RemoteA2aAgent(name="test_agent", agent_card=self.agent_card)
+    self.mock_genai_part_converter = Mock()
+    self.mock_a2a_part_converter = Mock()
+    self.agent = RemoteA2aAgent(
+        name="test_agent",
+        agent_card=self.agent_card,
+        genai_part_converter=self.mock_genai_part_converter,
+        a2a_part_converter=self.mock_a2a_part_converter,
+    )
 
     # Mock session and context
     self.mock_session = Mock(spec=Session)
@@ -483,7 +496,7 @@ class TestRemoteA2aAgentMessageHandling:
       ) as mock_convert:
         # Create a proper mock A2A message
         mock_a2a_message = Mock(spec=A2AMessage)
-        mock_a2a_message.taskId = None  # Will be set by the method
+        mock_a2a_message.task_id = None  # Will be set by the method
         mock_convert.return_value = mock_a2a_message
 
         result = self.agent._create_a2a_request_for_user_function_response(
@@ -492,7 +505,7 @@ class TestRemoteA2aAgentMessageHandling:
 
         assert result is not None
         assert result.params.message == mock_a2a_message
-        assert mock_a2a_message.taskId == "task-123"
+        assert mock_a2a_message.task_id == "task-123"
 
   def test_construct_message_parts_from_session_success(self):
     """Test successful message parts construction from session."""
@@ -509,24 +522,21 @@ class TestRemoteA2aAgentMessageHandling:
     self.mock_session.events = [mock_event]
 
     with patch(
-        "google.adk.agents.remote_a2a_agent._convert_foreign_event"
+        "google.adk.agents.remote_a2a_agent._present_other_agent_message"
     ) as mock_convert:
       mock_convert.return_value = mock_event
 
-      with patch(
-          "google.adk.agents.remote_a2a_agent.convert_genai_part_to_a2a_part"
-      ) as mock_convert_part:
-        mock_a2a_part = Mock()
-        mock_convert_part.return_value = mock_a2a_part
+      mock_a2a_part = Mock()
+      self.mock_genai_part_converter.return_value = mock_a2a_part
 
-        result = self.agent._construct_message_parts_from_session(
-            self.mock_context
-        )
+      result = self.agent._construct_message_parts_from_session(
+          self.mock_context
+      )
 
-        assert len(result) == 2  # Returns tuple of (parts, context_id)
-        assert len(result[0]) == 1  # parts list
-        assert result[0][0] == mock_a2a_part
-        assert result[1] is None  # context_id
+      assert len(result) == 2  # Returns tuple of (parts, context_id)
+      assert len(result[0]) == 1  # parts list
+      assert result[0][0] == mock_a2a_part
+      assert result[1] is None  # context_id
 
   def test_construct_message_parts_from_session_empty_events(self):
     """Test message parts construction with empty events."""
@@ -542,8 +552,8 @@ class TestRemoteA2aAgentMessageHandling:
   async def test_handle_a2a_response_success_with_message(self):
     """Test successful A2A response handling with message."""
     mock_a2a_message = Mock(spec=A2AMessage)
-    mock_a2a_message.taskId = "task-123"
-    mock_a2a_message.contextId = "context-123"
+    mock_a2a_message.task_id = "task-123"
+    mock_a2a_message.context_id = "context-123"
 
     mock_success_response = Mock(spec=SendMessageSuccessResponse)
     mock_success_response.result = mock_a2a_message
@@ -569,7 +579,10 @@ class TestRemoteA2aAgentMessageHandling:
 
       assert result == mock_event
       mock_convert.assert_called_once_with(
-          mock_a2a_message, self.agent.name, self.mock_context
+          mock_a2a_message,
+          self.agent.name,
+          self.mock_context,
+          self.mock_a2a_part_converter,
       )
       # Check that metadata was added
       assert result.custom_metadata is not None
@@ -581,7 +594,7 @@ class TestRemoteA2aAgentMessageHandling:
     """Test successful A2A response handling with task."""
     mock_a2a_task = Mock(spec=A2ATask)
     mock_a2a_task.id = "task-123"
-    mock_a2a_task.contextId = "context-123"
+    mock_a2a_task.context_id = "context-123"
 
     mock_success_response = Mock(spec=SendMessageSuccessResponse)
     mock_success_response.result = mock_a2a_task
@@ -607,7 +620,10 @@ class TestRemoteA2aAgentMessageHandling:
 
       assert result == mock_event
       mock_convert.assert_called_once_with(
-          mock_a2a_task, self.agent.name, self.mock_context
+          mock_a2a_task,
+          self.agent.name,
+          self.mock_context,
+          self.mock_a2a_part_converter,
       )
       # Check that metadata was added
       assert result.custom_metadata is not None
@@ -643,7 +659,14 @@ class TestRemoteA2aAgentExecution:
   def setup_method(self):
     """Setup test fixtures."""
     self.agent_card = create_test_agent_card()
-    self.agent = RemoteA2aAgent(name="test_agent", agent_card=self.agent_card)
+    self.mock_genai_part_converter = Mock()
+    self.mock_a2a_part_converter = Mock()
+    self.agent = RemoteA2aAgent(
+        name="test_agent",
+        agent_card=self.agent_card,
+        genai_part_converter=self.mock_genai_part_converter,
+        a2a_part_converter=self.mock_a2a_part_converter,
+    )
 
     # Mock session and context
     self.mock_session = Mock(spec=Session)
@@ -931,7 +954,7 @@ class TestRemoteA2aAgentIntegration:
 
     # Mock dependencies
     with patch(
-        "google.adk.agents.remote_a2a_agent._convert_foreign_event"
+        "google.adk.agents.remote_a2a_agent._present_other_agent_message"
     ) as mock_convert:
       mock_convert.return_value = mock_event
 
@@ -950,8 +973,8 @@ class TestRemoteA2aAgentIntegration:
           mock_response = Mock()
           mock_success_response = Mock(spec=SendMessageSuccessResponse)
           mock_a2a_message = Mock(spec=A2AMessage)
-          mock_a2a_message.taskId = "task-123"
-          mock_a2a_message.contextId = "context-123"
+          mock_a2a_message.task_id = "task-123"
+          mock_a2a_message.context_id = "context-123"
           mock_success_response.result = mock_a2a_message
           mock_response.root = mock_success_response
           mock_a2a_client.send_message.return_value = mock_response
