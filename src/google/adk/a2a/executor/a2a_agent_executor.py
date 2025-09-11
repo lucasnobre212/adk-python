@@ -24,6 +24,8 @@ from typing import Callable
 from typing import Optional
 import uuid
 
+from ...utils.context_utils import Aclosing
+
 try:
   from a2a.server.agent_execution import AgentExecutor
   from a2a.server.agent_execution.context import RequestContext
@@ -50,25 +52,35 @@ from google.adk.runners import Runner
 from pydantic import BaseModel
 from typing_extensions import override
 
-from ...utils.feature_decorator import experimental
 from ..converters.event_converter import convert_event_to_a2a_events
+from ..converters.part_converter import A2APartToGenAIPartConverter
+from ..converters.part_converter import convert_a2a_part_to_genai_part
+from ..converters.part_converter import convert_genai_part_to_a2a_part
+from ..converters.part_converter import GenAIPartToA2APartConverter
 from ..converters.request_converter import convert_a2a_request_to_adk_run_args
 from ..converters.utils import _get_adk_metadata_key
+from ..experimental import a2a_experimental
 from .task_result_aggregator import TaskResultAggregator
 
 logger = logging.getLogger('google_adk.' + __name__)
 
 
-@experimental
+@a2a_experimental
 class A2aAgentExecutorConfig(BaseModel):
   """Configuration for the A2aAgentExecutor."""
 
-  pass
+  a2a_part_converter: A2APartToGenAIPartConverter = (
+      convert_a2a_part_to_genai_part
+  )
+  gen_ai_part_converter: GenAIPartToA2APartConverter = (
+      convert_genai_part_to_a2a_part
+  )
 
 
-@experimental
+@a2a_experimental
 class A2aAgentExecutor(AgentExecutor):
   """An AgentExecutor that runs an ADK Agent against an A2A request and
+
   publishes updates to an event queue.
   """
 
@@ -80,7 +92,7 @@ class A2aAgentExecutor(AgentExecutor):
   ):
     super().__init__()
     self._runner = runner
-    self._config = config
+    self._config = config or A2aAgentExecutorConfig()
 
   async def _resolve_runner(self) -> Runner:
     """Resolve the runner, handling cases where it's a callable that returns a Runner."""
@@ -133,13 +145,13 @@ class A2aAgentExecutor(AgentExecutor):
     if not context.current_task:
       await event_queue.enqueue_event(
           TaskStatusUpdateEvent(
-              taskId=context.task_id,
+              task_id=context.task_id,
               status=TaskStatus(
                   state=TaskState.submitted,
                   message=context.message,
                   timestamp=datetime.now(timezone.utc).isoformat(),
               ),
-              contextId=context.context_id,
+              context_id=context.context_id,
               final=False,
           )
       )
@@ -153,17 +165,17 @@ class A2aAgentExecutor(AgentExecutor):
       try:
         await event_queue.enqueue_event(
             TaskStatusUpdateEvent(
-                taskId=context.task_id,
+                task_id=context.task_id,
                 status=TaskStatus(
                     state=TaskState.failed,
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     message=Message(
-                        messageId=str(uuid.uuid4()),
+                        message_id=str(uuid.uuid4()),
                         role=Role.agent,
                         parts=[TextPart(text=str(e))],
                     ),
                 ),
-                contextId=context.context_id,
+                context_id=context.context_id,
                 final=True,
             )
         )
@@ -181,7 +193,9 @@ class A2aAgentExecutor(AgentExecutor):
     runner = await self._resolve_runner()
 
     # Convert the a2a request to ADK run args
-    run_args = convert_a2a_request_to_adk_run_args(context)
+    run_args = convert_a2a_request_to_adk_run_args(
+        context, self._config.a2a_part_converter
+    )
 
     # ensure the session exists
     session = await self._prepare_session(context, run_args, runner)
@@ -196,12 +210,12 @@ class A2aAgentExecutor(AgentExecutor):
     # publish the task working event
     await event_queue.enqueue_event(
         TaskStatusUpdateEvent(
-            taskId=context.task_id,
+            task_id=context.task_id,
             status=TaskStatus(
                 state=TaskState.working,
                 timestamp=datetime.now(timezone.utc).isoformat(),
             ),
-            contextId=context.context_id,
+            context_id=context.context_id,
             final=False,
             metadata={
                 _get_adk_metadata_key('app_name'): runner.app_name,
@@ -212,12 +226,17 @@ class A2aAgentExecutor(AgentExecutor):
     )
 
     task_result_aggregator = TaskResultAggregator()
-    async for adk_event in runner.run_async(**run_args):
-      for a2a_event in convert_event_to_a2a_events(
-          adk_event, invocation_context, context.task_id, context.context_id
-      ):
-        task_result_aggregator.process_event(a2a_event)
-        await event_queue.enqueue_event(a2a_event)
+    async with Aclosing(runner.run_async(**run_args)) as agen:
+      async for adk_event in agen:
+        for a2a_event in convert_event_to_a2a_events(
+            adk_event,
+            invocation_context,
+            context.task_id,
+            context.context_id,
+            self._config.gen_ai_part_converter,
+        ):
+          task_result_aggregator.process_event(a2a_event)
+          await event_queue.enqueue_event(a2a_event)
 
     # publish the task result event - this is final
     if (
@@ -229,11 +248,11 @@ class A2aAgentExecutor(AgentExecutor):
       # the final result according to a2a protocol.
       await event_queue.enqueue_event(
           TaskArtifactUpdateEvent(
-              taskId=context.task_id,
-              lastChunk=True,
-              contextId=context.context_id,
+              task_id=context.task_id,
+              last_chunk=True,
+              context_id=context.context_id,
               artifact=Artifact(
-                  artifactId=str(uuid.uuid4()),
+                  artifact_id=str(uuid.uuid4()),
                   parts=task_result_aggregator.task_status_message.parts,
               ),
           )
@@ -241,25 +260,25 @@ class A2aAgentExecutor(AgentExecutor):
       # public the final status update event
       await event_queue.enqueue_event(
           TaskStatusUpdateEvent(
-              taskId=context.task_id,
+              task_id=context.task_id,
               status=TaskStatus(
                   state=TaskState.completed,
                   timestamp=datetime.now(timezone.utc).isoformat(),
               ),
-              contextId=context.context_id,
+              context_id=context.context_id,
               final=True,
           )
       )
     else:
       await event_queue.enqueue_event(
           TaskStatusUpdateEvent(
-              taskId=context.task_id,
+              task_id=context.task_id,
               status=TaskStatus(
                   state=task_result_aggregator.task_state,
                   timestamp=datetime.now(timezone.utc).isoformat(),
                   message=task_result_aggregator.task_status_message,
               ),
-              contextId=context.context_id,
+              context_id=context.context_id,
               final=True,
           )
       )

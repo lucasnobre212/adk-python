@@ -21,7 +21,7 @@ import pytest
 
 # Skip all tests in this module if Python version is less than 3.10
 pytestmark = pytest.mark.skipif(
-    sys.version_info < (3, 10), reason="A2A tool requires Python 3.10+"
+    sys.version_info < (3, 10), reason="A2A requires Python 3.10+"
 )
 
 # Import dependencies with version checking
@@ -37,23 +37,10 @@ try:
   from google.adk.runners import Runner
 except ImportError as e:
   if sys.version_info < (3, 10):
-    # Create dummy classes to prevent NameError during test collection
-    # Tests will be skipped anyway due to pytestmark
-    class DummyTypes:
-      pass
-
-    RequestContext = DummyTypes()
-    EventQueue = DummyTypes()
-    Message = DummyTypes()
-    Role = DummyTypes()
-    TaskState = DummyTypes()
-    TaskStatus = DummyTypes()
-    TaskStatusUpdateEvent = DummyTypes()
-    TextPart = DummyTypes()
-    A2aAgentExecutor = DummyTypes()
-    A2aAgentExecutorConfig = DummyTypes()
-    Event = DummyTypes()
-    Runner = DummyTypes()
+    # Imports are not needed since tests will be skipped due to pytestmark.
+    # The imported names are only used within test methods, not at module level,
+    # so no NameError occurs during module compilation.
+    pass
   else:
     raise e
 
@@ -69,7 +56,12 @@ class TestA2aAgentExecutor:
     self.mock_runner._new_invocation_context = Mock()
     self.mock_runner.run_async = AsyncMock()
 
-    self.mock_config = Mock(spec=A2aAgentExecutorConfig)
+    self.mock_a2a_part_converter = Mock()
+    self.mock_gen_ai_part_converter = Mock()
+    self.mock_config = A2aAgentExecutorConfig(
+        a2a_part_converter=self.mock_a2a_part_converter,
+        gen_ai_part_converter=self.mock_gen_ai_part_converter,
+    )
     self.executor = A2aAgentExecutor(
         runner=self.mock_runner, config=self.mock_config
     )
@@ -683,7 +675,7 @@ class TestA2aAgentExecutor:
     from a2a.types import TextPart
 
     test_message = Mock(spec=Message)
-    test_message.messageId = "test-message-id"
+    test_message.message_id = "test-message-id"
     test_message.role = Role.agent
     test_message.parts = [Mock(spec=TextPart)]
 
@@ -764,7 +756,7 @@ class TestA2aAgentExecutor:
     from a2a.types import TextPart
 
     test_message = Mock(spec=Message)
-    test_message.messageId = "test-message-id"
+    test_message.message_id = "test-message-id"
     test_message.role = Role.agent
     test_message.parts = [Mock(spec=TextPart)]
 
@@ -849,7 +841,7 @@ class TestA2aAgentExecutor:
     from a2a.types import TextPart
 
     test_message = Mock(spec=Message)
-    test_message.messageId = "test-message-id"
+    test_message.message_id = "test-message-id"
     test_message.role = Role.agent
     test_message.parts = [Part(root=TextPart(text="test content"))]
 
@@ -911,12 +903,12 @@ class TestA2aAgentExecutor:
               call[0][0]
               for call in self.mock_event_queue.enqueue_event.call_args_list
               if hasattr(call[0][0], "artifact")
-              and call[0][0].lastChunk == True
+              and call[0][0].last_chunk == True
           ]
           assert len(artifact_events) == 1
           artifact_event = artifact_events[0]
-          assert artifact_event.taskId == "test-task-id"
-          assert artifact_event.contextId == "test-context-id"
+          assert artifact_event.task_id == "test-task-id"
+          assert artifact_event.context_id == "test-context-id"
           # Check that artifact parts correspond to message parts
           assert len(artifact_event.artifact.parts) == len(test_message.parts)
           assert artifact_event.artifact.parts == test_message.parts
@@ -930,8 +922,8 @@ class TestA2aAgentExecutor:
           assert len(final_events) >= 1
           final_event = final_events[-1]  # Get the last final event
           assert final_event.status.state == TaskState.completed
-          assert final_event.taskId == "test-task-id"
-          assert final_event.contextId == "test-context-id"
+          assert final_event.task_id == "test-task-id"
+          assert final_event.context_id == "test-context-id"
 
   @pytest.mark.asyncio
   async def test_handle_request_with_non_working_state_publishes_status_only(
@@ -949,7 +941,7 @@ class TestA2aAgentExecutor:
     from a2a.types import TextPart
 
     test_message = Mock(spec=Message)
-    test_message.messageId = "test-message-id"
+    test_message.message_id = "test-message-id"
     test_message.role = Role.agent
     test_message.parts = [Part(root=TextPart(text="test content"))]
 
@@ -1011,7 +1003,7 @@ class TestA2aAgentExecutor:
               call[0][0]
               for call in self.mock_event_queue.enqueue_event.call_args_list
               if hasattr(call[0][0], "artifact")
-              and call[0][0].lastChunk == True
+              and call[0][0].last_chunk == True
           ]
           assert len(artifact_events) == 0
 
@@ -1025,5 +1017,5 @@ class TestA2aAgentExecutor:
           final_event = final_events[-1]  # Get the last final event
           assert final_event.status.state == TaskState.auth_required
           assert final_event.status.message == test_message
-          assert final_event.taskId == "test-task-id"
-          assert final_event.contextId == "test-context-id"
+          assert final_event.task_id == "test-task-id"
+          assert final_event.context_id == "test-context-id"

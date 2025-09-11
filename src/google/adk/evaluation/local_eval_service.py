@@ -24,13 +24,13 @@ import uuid
 
 from typing_extensions import override
 
-from ..agents import BaseAgent
+from ..agents.base_agent import BaseAgent
 from ..artifacts.base_artifact_service import BaseArtifactService
 from ..artifacts.in_memory_artifact_service import InMemoryArtifactService
 from ..errors.not_found_error import NotFoundError
 from ..sessions.base_session_service import BaseSessionService
 from ..sessions.in_memory_session_service import InMemorySessionService
-from ..utils.feature_decorator import working_in_progress
+from ..utils.feature_decorator import experimental
 from .base_eval_service import BaseEvalService
 from .base_eval_service import EvaluateConfig
 from .base_eval_service import EvaluateRequest
@@ -60,7 +60,7 @@ def _get_session_id() -> str:
   return f'{EVAL_SESSION_ID_PREFIX}{str(uuid.uuid4())}'
 
 
-@working_in_progress("Incomplete feature, don't use yet")
+@experimental
 class LocalEvalService(BaseEvalService):
   """An implementation of BaseEvalService, that runs the evals locally."""
 
@@ -68,14 +68,19 @@ class LocalEvalService(BaseEvalService):
       self,
       root_agent: BaseAgent,
       eval_sets_manager: EvalSetsManager,
-      metric_evaluator_registry: MetricEvaluatorRegistry = DEFAULT_METRIC_EVALUATOR_REGISTRY,
-      session_service: BaseSessionService = InMemorySessionService(),
-      artifact_service: BaseArtifactService = InMemoryArtifactService(),
+      metric_evaluator_registry: Optional[MetricEvaluatorRegistry] = None,
+      session_service: Optional[BaseSessionService] = None,
+      artifact_service: Optional[BaseArtifactService] = None,
       eval_set_results_manager: Optional[EvalSetResultsManager] = None,
       session_id_supplier: Callable[[], str] = _get_session_id,
   ):
     self._root_agent = root_agent
     self._eval_sets_manager = eval_sets_manager
+    metric_evaluator_registry = (
+        metric_evaluator_registry or DEFAULT_METRIC_EVALUATOR_REGISTRY
+    )
+    session_service = session_service or InMemorySessionService()
+    artifact_service = artifact_service or InMemoryArtifactService()
     self._metric_evaluator_registry = metric_evaluator_registry
     self._session_service = session_service
     self._artifact_service = artifact_service
@@ -114,8 +119,6 @@ class LocalEvalService(BaseEvalService):
           if eval_case.eval_id in inference_request.eval_case_ids
       ]
 
-    root_agent = self._root_agent.clone()
-
     semaphore = asyncio.Semaphore(
         value=inference_request.inference_config.parallelism
     )
@@ -126,7 +129,7 @@ class LocalEvalService(BaseEvalService):
             app_name=inference_request.app_name,
             eval_set_id=inference_request.eval_set_id,
             eval_case=eval_case,
-            root_agent=root_agent,
+            root_agent=self._root_agent,
         )
 
     inference_results = [run_inference(eval_case) for eval_case in eval_cases]

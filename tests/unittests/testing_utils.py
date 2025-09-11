@@ -23,7 +23,7 @@ from google.adk.agents.live_request_queue import LiveRequestQueue
 from google.adk.agents.llm_agent import Agent
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.agents.run_config import RunConfig
-from google.adk.artifacts import InMemoryArtifactService
+from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
 from google.adk.events.event import Event
 from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
 from google.adk.models.base_llm import BaseLlm
@@ -36,9 +36,22 @@ from google.adk.runners import InMemoryRunner as AfInMemoryRunner
 from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.sessions.session import Session
+from google.adk.utils.context_utils import Aclosing
 from google.genai import types
 from google.genai.types import Part
 from typing_extensions import override
+
+
+def create_test_agent(name: str = 'test_agent') -> LlmAgent:
+  """Create a simple test agent for use in unit tests.
+
+  Args:
+    name: The name of the test agent.
+
+  Returns:
+    A configured LlmAgent instance suitable for testing.
+  """
+  return LlmAgent(name=name)
 
 
 class UserContent(types.Content):
@@ -149,19 +162,26 @@ class TestInMemoryRunner(AfInMemoryRunner):
       self, new_message: types.ContentUnion
   ) -> list[Event]:
 
-    session = await self.session_service.create_session(
-        app_name='InMemoryRunner', user_id='test_user'
-    )
-    collected_events = []
-
-    async for event in self.run_async(
-        user_id=session.user_id,
-        session_id=session.id,
-        new_message=get_user_content(new_message),
-    ):
+    collected_events: list[Event] = []
+    async for event in self.run_async_with_new_session_agen(new_message):
       collected_events.append(event)
 
     return collected_events
+
+  async def run_async_with_new_session_agen(
+      self, new_message: types.ContentUnion
+  ) -> AsyncGenerator[Event, None]:
+    session = await self.session_service.create_session(
+        app_name='InMemoryRunner', user_id='test_user'
+    )
+    agen = self.run_async(
+        user_id=session.user_id,
+        session_id=session.id,
+        new_message=get_user_content(new_message),
+    )
+    async with Aclosing(agen):
+      async for event in agen:
+        yield event
 
 
 class InMemoryRunner:
@@ -247,6 +267,7 @@ class MockModel(BaseLlm):
 
   requests: list[LlmRequest] = []
   responses: list[LlmResponse]
+  error: Union[Exception, None] = None
   response_index: int = -1
 
   @classmethod
@@ -255,7 +276,10 @@ class MockModel(BaseLlm):
       responses: Union[
           list[types.Part], list[LlmResponse], list[str], list[list[types.Part]]
       ],
+      error: Union[Exception, None] = None,
   ):
+    if error and not responses:
+      return cls(responses=[], error=error)
     if not responses:
       return cls(responses=[])
     elif isinstance(responses[0], LlmResponse):
@@ -278,13 +302,16 @@ class MockModel(BaseLlm):
 
       return cls(responses=responses)
 
-  @staticmethod
-  def supported_models() -> list[str]:
+  @classmethod
+  @override
+  def supported_models(cls) -> list[str]:
     return ['mock']
 
   def generate_content(
       self, llm_request: LlmRequest, stream: bool = False
   ) -> Generator[LlmResponse, None, None]:
+    if self.error:
+      raise self.error
     # Increasement of the index has to happen before the yield.
     self.response_index += 1
     self.requests.append(llm_request)
@@ -303,6 +330,7 @@ class MockModel(BaseLlm):
   @contextlib.asynccontextmanager
   async def connect(self, llm_request: LlmRequest) -> BaseLlmConnection:
     """Creates a live connection to the LLM."""
+    self.requests.append(llm_request)
     yield MockLlmConnection(self.responses)
 
 
